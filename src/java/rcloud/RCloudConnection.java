@@ -38,7 +38,7 @@ public class RCloudConnection {
     private static volatile boolean isInitialized = false;
     private static final Logger log = LoggerFactory.getLogger(RCloudConnection.class);
     private static boolean validated = validateEnvironment();
-    private final static String poolname = "ATLAS_32G";
+    private final static String poolname = "EMIF_8G";
 
     private RServices rConnection = null;
 
@@ -167,12 +167,6 @@ public class RCloudConnection {
 
 
     public static boolean validateEnvironment() {
-
-        setSystemProperty("naming.mode", "db");
-        setSystemProperty("db.type", "oracle");
-        setSystemProperty("db.name", "RCLDPRO");
-        setSystemProperty("db.host", "ora-vm-030.ebi.ac.uk");
-        setSystemProperty("db.port", "1531");
 
         /*
         if (System.getProperty("pools.dbmode.host") == null) {

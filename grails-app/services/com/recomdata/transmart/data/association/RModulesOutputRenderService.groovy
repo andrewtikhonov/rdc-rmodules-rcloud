@@ -1,0 +1,286 @@
+/*************************************************************************   
+* Copyright 2008-2012 Janssen Research & Development, LLC.
+*
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+******************************************************************/
+
+package com.recomdata.transmart.data.association
+
+import org.apache.commons.io.FileUtils
+
+class RModulesOutputRenderService {
+
+	static scope         = "request"
+
+	def grailsApplication
+	def zipService
+	def tempDirectory = ""
+	def jobName = ""
+	def jobTypeName = ""
+	def zipLink = ""
+	
+    //<editor-fold desc="Configuration fetching">
+		
+    /**
+     * The directOry where the job data is stored and from where the R scripts
+     * run.
+     *
+     * The odd name ("folderDirectory") is an historical artifact.
+     *
+     * @return the jobs directory
+     */
+    private String getTempFolderDirectory() {
+        String dir = grailsApplication.config.RModules.tempFolderDirectory
+        if (dir && !dir.endsWith(File.separator)) {
+            dir += File.separator
+        }
+        dir
+    }
+		
+    /**
+     * The directory where the zip file (and, if transferImageFile is true, the
+     * images as well) will be copied to. The web server should be able to serve
+     * static files from this directory via the logical name specified in
+     * the imageURL configuration entry.
+     *
+     * If transferImageFile is false, then this should be temporary jobs
+     * directory (see {@link #getTempFolderDirectory()}).
+     *
+     * @return the directory where the analysis files will be copied to.
+     */
+    private String getTempImageFolder() {
+        def dir = grailsApplication.config.RModules.temporaryImageFolder
+        if (dir && !dir.endsWith(File.separator)) {
+            dir += File.separator
+        }
+        if (!dir && !transferImageFile) {
+            dir = tempFolderDirectory
+        }
+	
+        if (!transferImageFile && dir != tempFolderDirectory) {
+            log.warn "We're not copying images, but the image directory is \
+                    not the same as the jobs directory!"
+        }
+	
+        dir
+    }
+			
+    /**
+     * Whether to copy the images from the jobs directory to another directory
+     * from which they can be served. This should be set to false for
+     * production for performance reasons.
+     *
+     * @return whether to copy images from the jobs directory to the
+     *         tempFolderDirectory.
+     */
+    private boolean isTransferImageFile() {
+        grailsApplication.config.RModules.transferImageFile
+    }
+			
+    /**
+     * The logical path from which the images will be served.
+     *
+     * @return URL path from which images will be served
+     */
+    private String getImageURL() {
+        String url = grailsApplication.config.RModules.imageURL
+        if (!url) {
+            return url;
+        }
+        if (!url.endsWith('/') && !url.toLowerCase().endsWith("%2f")) {
+            url += "/"
+        }
+        url
+			}
+    //</editor-fold>
+
+    def initializeAttributes(jobName, jobTypeName, linksArray) {
+        def zipLocation
+
+        log.debug "initializeAttributes for jobName '$jobName'; jobTypeName " +
+                "'$jobTypeName'"
+        log.debug "Settings are: jobs directory -> $tempFolderDirectory, " +
+                "images directory -> $tempImageFolder, images URL -> " +
+                "$imageURL, transfer image -> $transferImageFile"
+
+		this.jobName = jobName
+		this.jobTypeName = jobTypeName
+			
+		this.tempDirectory = tempFolderDirectory + jobName + File.separator +
+                "workingDirectory" + File.separator
+        String outputDirectory = tempImageFolder + this.jobName + File.separator
+	
+        File tempDirectoryFile   = new File(this.tempDirectory)
+        File outputDirectoryFile = new File(outputDirectory)
+			
+        if (!outputDirectoryFile.exists()) {
+            if (transferImageFile) {
+                createDirectory(outputDirectoryFile)
+            }
+        }
+	
+        tempDirectoryFile.traverse(nameFilter: ~/(?i).*\.png/) { currentImageFile ->
+            File oldImage = new File(currentImageFile.path),
+                 newImage = new File(outputDirectory, currentImageFile.name);
+            log.debug("Move or copy $oldImage to $newImage")
+            if (transferImageFile) {
+                newImage = new File(outputDirectory, currentImageFile.name);
+				//TODO move FileUtils to Core
+                FileUtils.copyFile(oldImage, newImage)
+            } else {
+                oldImage.renameTo(newImage)
+            }
+				
+            String currentLink = "${imageURL}$jobName/${currentImageFile.name}"
+            log.debug("New image link: " + currentLink)
+				linksArray.add(currentLink)
+			};
+			
+        zipLocation = "${outputDirectory}" + File.separator + "zippedData.zip"
+			this.zipLink = "images/${imageURL}${jobName}/zippedData.zip"
+			
+        if (!new File(zipLocation).isFile()) {
+            zipService.zipFolder(tempDirectory, zipLocation)
+		}
+    }
+	
+	def String fileParseLoop(tempDirectoryFile, fileNamePattern,
+                             fileNameExtractionPattern, fileParseFunction) {
+		//This is the string we return.
+		String parseValueString = ""
+		
+		//Reinitialize the text files array list.
+		def ArrayList<String> txtFiles = new ArrayList<String>()
+		
+		//Loop through the directory create an array of txt files to be parsed.
+		tempDirectoryFile.traverse(nameFilter: ~fileNamePattern) {
+			currentTextFile ->
+			
+			txtFiles.add(currentTextFile.path)
+		}
+
+		//Loop through the file path array and parse each of the files. We do this to make different tables if there are multiple files.
+		txtFiles.each {
+			//Parse out the name of the group from the name of the text file.
+			def matcher = (it =~ fileNameExtractionPattern)
+			
+			if (matcher.matches() && txtFiles.size > 1) {
+				//Add the HTML that will separate the different files.
+				parseValueString += "<br /><br /><span class='AnalysisHeader'>" +
+                        "${matcher[0][1]}</span><hr />"
+			}
+			
+			//Create objects for the output file.
+			File parsableFile = new File(it);
+			
+			//Parse the output files.
+			parseValueString += fileParseFunction.call(parsableFile.getText())
+		}
+		
+		parseValueString
+	}
+
+    def parseVersionFile()
+    {
+        def tempDirectoryFile = new File(tempDirectory)
+        String versionData = fileParseLoop(tempDirectoryFile,/.*sessionInfo.*\.txt/,/.*sessionInfo(.*)\.txt/, parseVersionFileClosure)
+
+        return versionData
+    }
+
+    def parseVersionFileClosure = {
+        statsInStr ->
+
+            //Buffer that will hold the HTML we output.
+            StringBuffer buf = new StringBuffer();
+
+            buf.append("<br /><a href='#' onclick='\$(\"versionInfoDiv\").toggle()'><span class='AnalysisHeader'>R Version Information</span></a><br /><br />")
+
+            buf.append("<div id='versionInfoDiv' style='display: none;'>")
+
+            //This will tell us if we are printing the contents of the package or the session info. We will print the package contents in a table.
+            Boolean packageCommand = false
+            Boolean firstPackageLine = true
+
+            statsInStr.eachLine
+                    {
+
+                        if(it.contains("||PACKAGEINFO||"))
+                        {
+                            packageCommand = true
+                            return;
+                        }
+
+                        if(!packageCommand)
+                        {
+                            buf.append(it)
+                            buf.append("<br />")
+                        }
+                        else
+                        {
+                            def currentLine = it.split("\t")
+
+                            if(firstPackageLine)
+                            {
+                                buf.append("<br /><br /><table class='AnalysisResults'>")
+                                buf.append("<tr>")
+                                currentLine.each()
+                                        {
+                                            currentSegment ->
+
+                                                buf.append("<th>${currentSegment}</th>")
+
+                                        }
+                                buf.append("</tr>")
+
+                                firstPackageLine = false
+                            }
+                            else
+                            {
+                                buf.append("<tr>")
+                                currentLine.each()
+                                        {
+                                            currentSegment ->
+
+                                                buf.append("<td>${currentSegment}</td>")
+
+                                        }
+                                buf.append("</tr>")
+                            }
+                        }
+                    }
+
+            buf.append("</table>")
+            buf.append("</div>")
+
+            buf.toString();
+    }
+	
+    def createDirectory(File directory) {
+        def dirs = []
+        while (directory && !directory.exists()) {
+            dirs = [directory] + dirs
+            directory = directory.parentFile
+        }
+        dirs.each {
+            if (!it.mkdir()) {
+                log.error "Directory $it neither exists, " +
+                        "nor could it be created"
+                return false;
+            } else {
+                log.debug "Created directory $it"
+            }
+        }
+        true
+    }
+}
